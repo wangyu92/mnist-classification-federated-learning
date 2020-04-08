@@ -24,11 +24,11 @@ from model import Model
 #############################################################################
 # Hyperparameters                                                           #
 #############################################################################
-NUM_CLIENTS     = 60
+NUM_CLIENTS     = 100
 FRACTION        = 0.1
-L_BATCH_SIZE    = 10
+L_BATCH_SIZE    = 60
 L_EPOCH         = 10
-LR              = 1e-2
+LR              = 5e-3
 
 DIR_DATA        = './mnist_data/'
 
@@ -122,20 +122,6 @@ def test_model(model):
     correct += torch.sum(torch.eq(pred_labels, labels)).item()
     total += len(labels)
 
-    # for batch_idx, (x, y) in enumerate(testloader):
-    #     x, y = x.to(device), y.to(device)
-
-    #     # Inference
-    #     outputs = model(x)
-    #     batch_loss = nn.NLLLoss()(outputs, y)
-    #     loss += batch_loss.item()
-
-    #     # Prediction
-    #     _, pred_labels = torch.max(outputs, 1)
-    #     pred_labels = pred_labels.view(-1)
-    #     correct += torch.sum(torch.eq(pred_labels, y)).item()
-    #     total += len(y)
-
     accuracy = correct/total
     return accuracy, loss
 
@@ -146,6 +132,8 @@ def central(dataset_queues, model_queues, update_queues):
     # Create model
     model = Model()
     model.to(device)
+    print(test_model(model))
+    print()
 
     #############################################################################
     # Select random fraction of clients, and global model to each client        #
@@ -156,11 +144,6 @@ def central(dataset_queues, model_queues, update_queues):
 
     num_rounds = 0
     while True:
-        #############################################################################
-        # Test                                                                      #
-        #############################################################################
-        print(test_model(model))
-        
         print('# of Round : ', num_rounds)
 
         #############################################################################
@@ -192,6 +175,11 @@ def central(dataset_queues, model_queues, update_queues):
         averaged_states = average_weights(local_states)
         model.load_state_dict(averaged_states)
 
+        #############################################################################
+        # Test                                                                      #
+        #############################################################################
+        print(test_model(model))
+
         num_rounds += 1
         print()
 
@@ -220,6 +208,8 @@ def local(i, dataset_queue, model_queue, update_queue):
     model.to(device)
 
     train_images, train_labels = dataset_queue.get()
+    train_images = np.array_split(train_images, len(train_images) // L_BATCH_SIZE)
+    train_labels = np.array_split(train_labels, len(train_labels) // L_BATCH_SIZE)
 
     while True:
         #############################################################################
@@ -233,8 +223,9 @@ def local(i, dataset_queue, model_queue, update_queue):
         #############################################################################
         losses = []
         for epoch in range(L_EPOCH):
-            loss = train_step(model, train_images, train_labels)
-            losses.append(loss)
+            for b_idx in range(len(train_images)):
+                loss = train_step(model, train_images[b_idx], train_labels[b_idx])
+                losses.append(loss)
 
         #############################################################################
         # Send model to the server                                                  #
