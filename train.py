@@ -24,7 +24,7 @@ from model import Model
 #############################################################################
 # Hyperparameters                                                           #
 #############################################################################
-NUM_CLIENTS     = 2
+NUM_CLIENTS     = 60
 FRACTION        = 0.1
 L_BATCH_SIZE    = 10
 L_EPOCH         = 10
@@ -32,8 +32,9 @@ LR              = 1e-2
 
 DIR_DATA        = './mnist_data/'
 
-for i in tqdm(range(100)):
-     print(i)
+# CUDA
+CUDA = False
+CUDA_INDEX = 2
 
 #############################################################################
 # Util functions                                                            #
@@ -41,7 +42,7 @@ for i in tqdm(range(100)):
 
 def cuda_device(enable=True, idx=0):
     if enable:
-        d_str = 'cuda:' + idx
+        d_str = 'cuda:' + str(idx)
         device = torch.device(d_str if torch.cuda.is_available() else 'cpu')
     else:
         device = torch.device('cpu')
@@ -55,13 +56,13 @@ def get_train_dataset(split=True):
     ])
 
     dataset_torch = datasets.MNIST(
-        DIR_DATA, train=True, download=True, transforms=tf
+        DIR_DATA, train=True, download=True, transform=tf
     )
 
     loader = DataLoader(dataset_torch, batch_size=len(dataset_torch), shuffle=True)
 
     images, labels = next(enumerate(loader))[1]
-    images, lables = images.numpy(), labels.numpy()
+    images, labels = images.numpy(), labels.numpy()
 
     images = np.split(images, NUM_CLIENTS)
     labels = np.split(labels, NUM_CLIENTS)
@@ -76,7 +77,7 @@ def get_test_dataset():
     ])
 
     dataset_torch = datasets.MNIST(
-        DIR_DATA, train=False, download=True, transforms=tf
+        DIR_DATA, train=False, download=True, transform=tf
     )
 
     loader = DataLoader(dataset_torch, batch_size=len(dataset_torch), shuffle=True)
@@ -106,19 +107,20 @@ def test_model(model):
     device = torch.device(next(model.parameters()).device if next(model.parameters()).is_cuda else 'cpu')
 
     model.eval()
+    loss, total, correct = 0.0, 0.0, 0.0
 
     images, labels = get_test_dataset()
     images, labels = torch.tensor(images), torch.tensor(labels)
-    images, labels = images.to(device), labels(device)
+    images, labels = images.to(device), labels.to(device)
 
     outputs = model(images)
-    batch_loss = nn.NLLLoss()(outputs, y)
+    batch_loss = nn.NLLLoss()(outputs, labels)
     loss += batch_loss.item()
 
     _, pred_labels = torch.max(outputs, 1)
     pred_labels = pred_labels.view(-1)
-    correct += torch.sum(torch.eq(pred_labels, y)).item()
-    total += len(y)
+    correct += torch.sum(torch.eq(pred_labels, labels)).item()
+    total += len(labels)
 
     # for batch_idx, (x, y) in enumerate(testloader):
     #     x, y = x.to(device), y.to(device)
@@ -139,22 +141,28 @@ def test_model(model):
 
 
 def central(dataset_queues, model_queues, update_queues):
-    device = cuda_device(False)
+    device = cuda_device(CUDA, CUDA_INDEX)
+
+    # Create model
+    model = Model()
+    model.to(device)
 
     #############################################################################
     # Select random fraction of clients, and global model to each client        #
     #############################################################################
     train_images, train_labels = get_train_dataset(split=True)
     for i in range(NUM_CLIENTS):
-        dataset_queues[i].put((train_images[i], train_labels[i]))
+        dataset_queues[i].put((train_images[i].copy(), train_labels[i].copy()))
 
-    #############################################################################
-    # Create model                                                              #
-    #############################################################################
-    model = Model()
-    model.to(device)
-
+    num_rounds = 0
     while True:
+        #############################################################################
+        # Test                                                                      #
+        #############################################################################
+        print(test_model(model))
+        
+        print('# of Round : ', num_rounds)
+
         #############################################################################
         # Select random fraction of clients, and global model to each client        #
         #############################################################################
@@ -162,6 +170,7 @@ def central(dataset_queues, model_queues, update_queues):
 
         num_cli_sel = max(int(FRACTION * NUM_CLIENTS), 1)
         clients_sel = np.random.choice(range(NUM_CLIENTS), num_cli_sel, replace=False)
+        print('selected clients : ', clients_sel)
 
         for idx in clients_sel:
             model_state = model.state_dict()
@@ -183,15 +192,18 @@ def central(dataset_queues, model_queues, update_queues):
         averaged_states = average_weights(local_states)
         model.load_state_dict(averaged_states)
 
-        #############################################################################
-        # Test                                                                      #
-        #############################################################################
-        test_model(model)
+        num_rounds += 1
+        print()
 
 #############################################################################
 # Local                                                                     #
 #############################################################################
-def tain_step(model, images, labels):
+def train_step(model, images, labels):
+    device = model.getdevice()
+
+    images = torch.tensor(images.copy(), device=device)
+    labels = torch.tensor(labels.copy(), device=device)
+
     optimizer = optim.Adam(model.parameters(), LR)
     optimizer.zero_grad()
     probs = model(images)
@@ -202,6 +214,7 @@ def tain_step(model, images, labels):
     return loss.item()
 
 def local(i, dataset_queue, model_queue, update_queue):
+    device = cuda_device(CUDA, CUDA_INDEX)
 
     model = Model()
     model.to(device)
@@ -219,9 +232,9 @@ def local(i, dataset_queue, model_queue, update_queue):
         # Local Computation (train)                                                 #
         #############################################################################
         losses = []
-        for epoch in L_EPOCH:
+        for epoch in range(L_EPOCH):
             loss = train_step(model, train_images, train_labels)
-            losses.append(loss.item())
+            losses.append(loss)
 
         #############################################################################
         # Send model to the server                                                  #
